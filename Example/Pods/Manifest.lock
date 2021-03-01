@@ -1,0 +1,16 @@
+PODS:
+  - PoCache (1.0.0)
+
+DEPENDENCIES:
+  - PoCache (from `../`)
+
+EXTERNAL SOURCES:
+  PoCache:
+    :path: "../"
+
+SPEC CHECKSUMS:
+  PoCache: 90ae9cc01fce4ea70546a354de92bc24db61779e
+
+PODFILE CHECKSUM: 4a40e8838f1be3abe99bc9aa0445823f7d3b0593
+
+COCOAPODS: 1.9.3

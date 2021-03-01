@@ -1,0 +1,296 @@
+//
+//  PoDiskCache.swift
+//  KitDemo
+//
+//  Created by 黄中山 on 2018/7/11.
+//  Copyright © 2018年 黄中山. All rights reserved.
+//
+
+import Foundation
+
+public final class PoDiskCache {
+    
+    // MARK: - Properties - [attribute]
+    
+    public var name: String = ""
+    public let path: String
+    /// 阀值，data如果大于阀值则会存储到file system，否则存储到sqlite database
+    let inlineThreshold: Int
+    
+    
+    // MARK: - Properties - [limit]
+    
+    public var countLimit: Int = Int.max
+    public var costLimit: Int = Int.max
+    public var ageLimit: Int = Int.max
+    public var freeDiskSpaceLimit: Int = 0
+    public var autoTrimInterval: TimeInterval = 60
+    public var isErrorLogsEnable: Bool {
+        get {
+            return _kv.isErrorLogsEnable
+        }
+        set {
+            _kv.isErrorLogsEnable = newValue
+        }
+    }
+    
+    
+    // MARK: - Properties - [private]
+    
+    let _kv: PoKVStorage
+    let _lock: DispatchSemaphore = DispatchSemaphore(value: 1)
+    let _queue: DispatchQueue = DispatchQueue(label: "com.potato.cache.disk.access", qos: .utility, attributes: .concurrent, autoreleaseFrequency: .inherit, target: nil)
+    
+    
+    
+    // MARK: - Inilitializers
+    
+    public init(path: String, inlineThredhold: Int = 1024*20) { // 20kb
+        self.path = path
+        self.inlineThreshold = inlineThredhold
+        let type: PoKVStorage.StorageType
+        if inlineThredhold == 0 {
+            type = .file
+        } else if inlineThredhold == Int.max {
+            type = .sqlite
+        } else {
+            type = .mixed
+        }
+        self._kv = PoKVStorage(path: path, storageType: type)
+    }
+    
+    
+    
+    // MARK: - Methods - [access]
+    
+    public func containsObject(forKey key: String) -> Bool {
+        _ = _lock.wait(timeout: .distantFuture)
+        let contains = _kv.itemExists(forKey: key)
+        _lock.signal()
+        return contains
+    }
+    
+    public func containsObject(forKey key: String, completion: @escaping (String, Bool) -> Void) {
+        _queue.async { [weak self] in
+            guard let strongSelf = self else { completion(key, false); return }
+            let contains = strongSelf.containsObject(forKey: key)
+            completion(key, contains)
+        }
+    }
+    
+    public func object(forKey key: String) -> Data? {
+        _ = _lock.wait(timeout: .distantFuture)
+        let item = _kv.item(forKey: key)
+        _lock.signal()
+        
+        return item?.value
+    }
+    
+    public func object(forKey key: String, completion: @escaping (String, Data?) -> Void) {
+        _queue.async { [weak self] in
+            guard let strongSelf = self else { completion(key, nil); return }
+            let data = strongSelf.object(forKey: key)
+            completion(key, data)
+        }
+    }
+    
+    public func setObject(_ object: Data, forKey key: String) {
+        var filename: String?
+        if object.count > inlineThreshold {
+            filename = key.md5
+        }
+        _ = _lock.wait(timeout: .distantFuture)
+        _kv.saveItem(withKey: key, value: object, filename: filename, extendedData: nil)
+        _lock.signal()
+    }
+    
+    public func setObject(_ object: Data, forKey key: String, completion: @escaping () -> Void) {
+        _queue.async { [weak self] in
+            guard let strongSelf = self else { completion(); return }
+            strongSelf.setObject(object, forKey: key)
+            completion()
+        }
+    }
+    
+    public func removeObject(forKey key: String) {
+        _ = _lock.wait(timeout: .distantFuture)
+        _kv.removeItem(forKey: key)
+        _lock.signal()
+    }
+    
+    public func removeObject(forKey key: String, completion: @escaping (String) -> Void) {
+        _queue.async { [weak self] in
+            guard let strongSelf = self else { completion(key); return }
+            strongSelf.removeObject(forKey: key)
+            completion(key)
+        }
+    }
+    
+    public func removeAllObjects() {
+        _ = _lock.wait(timeout: .distantFuture)
+        _kv.removeAllItems()
+        _lock.signal()
+    }
+    
+    public func removeAllObjects(completion: @escaping () -> Void) {
+        _queue.async { [weak self] in
+            guard let strongSelf = self else { completion(); return }
+            strongSelf.removeAllObjects()
+            completion()
+        }
+    }
+    
+    public func removeAllObjects(progresee: ((Int, Int) -> Void)?, completion: ((Bool) -> Void)?) {
+        _queue.async { [weak self] in
+            guard let strongSelf = self else { completion?(true); return }
+            _ = strongSelf._lock.wait(timeout: .distantFuture)
+            strongSelf._kv.removeAllItems(progress: progresee, end: completion)
+            strongSelf._lock.signal()
+        }
+    }
+    
+    public func totalCount() -> Int {
+        _ = _lock.wait(timeout: .distantFuture)
+        let count = _kv.itemsCount()
+        _lock.signal()
+        return count
+    }
+    
+    public func totalCount(completion: @escaping (Int) -> Void) {
+        _queue.async { [weak self] in
+            guard let strongSelf = self else { completion(-1); return }
+            let count = strongSelf.totalCount()
+            completion(count)
+        }
+    }
+    
+    public func totalCost() -> Int {
+        _ = _lock.wait(timeout: .distantFuture)
+        let cost = _kv.itemsSize()
+        _lock.signal()
+        return cost
+    }
+    
+    public func totalCost(completion: @escaping (Int) -> Void) {
+        _queue.async { [weak self] in
+            guard let strongSelf = self else { completion(-1); return }
+            let cost = strongSelf.totalCount()
+            completion(cost)
+        }
+    }
+    
+    
+    
+    // MARK: - Methods - [trim]
+    
+    public func trimToCount(_ count: Int) {
+        _ = _lock.wait(timeout: .distantFuture)
+        _trimToCount(count)
+        _lock.signal()
+    }
+    
+    public func trimToCount(_ count: Int, completion: @escaping () -> Void) {
+        _queue.async { [weak self] in
+            guard let strongSelf = self else { completion(); return }
+            strongSelf.trimToCount(count)
+            completion()
+        }
+    }
+    
+    public func trimToCost(_ cost: Int) {
+        _ = _lock.wait(timeout: .distantFuture)
+        _trimToCost(cost)
+        _lock.signal()
+    }
+    
+    public func trimToCost(_ cost: Int, completion: @escaping () -> Void) {
+        _queue.async { [weak self] in
+            guard let strongSelf = self else { completion(); return }
+            strongSelf.trimToCost(cost)
+            completion()
+        }
+    }
+    
+    public func trimToAge(_ age: Int) {
+        _ = _lock.wait(timeout: .distantFuture)
+        _trimToAge(age)
+        _lock.signal()
+    }
+    
+    public func trimToAge(_ age: Int, completion: @escaping () -> Void) {
+        _queue.async { [weak self] in
+            guard let strongSelf = self else { completion(); return }
+            strongSelf.trimToAge(age)
+            completion()
+        }
+    }
+    
+    
+    
+    // MARK: - Methods - [private]
+    
+    private func _freeSpaceInDisk() -> Int {
+        do {
+            let attributes = try FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory())
+            let space = attributes[FileAttributeKey.systemFreeSize] as! Int
+            if space < 0 { return -1 }
+            return space
+        } catch {
+            return -1
+        }
+    }
+    
+    private func _trimRecursively() {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: DispatchTime.now() + autoTrimInterval) { [weak self] in
+            guard let strongSelf = self else { return }
+            strongSelf._trimBackground()
+            strongSelf._trimRecursively()
+        }
+    }
+    
+    private func _trimBackground() {
+        _queue.async { [weak self] in
+            guard let strongSelf = self else { return }
+            _ = strongSelf._lock.wait(timeout: .distantFuture)
+            strongSelf._trimToCost(strongSelf.costLimit)
+            strongSelf._trimToCount(strongSelf.countLimit)
+            strongSelf._trimToAge(strongSelf.ageLimit)
+            strongSelf._trimToFreeDiskSpace(strongSelf.freeDiskSpaceLimit)
+            strongSelf._lock.signal()
+        }
+    }
+    
+    private func _trimToCount(_ count: Int) {
+        if count >= Int.max { return }
+        _kv.removeItemsToFitCount(count)
+    }
+    
+    private func _trimToCost(_ cost: Int) {
+        if cost >= Int.max { return }
+        _kv.removeItemsToFitSize(cost)
+    }
+    
+    private func _trimToAge(_ age: Int) {
+        if age <= 0 {
+            _kv.removeAllItems()
+            return
+        }
+        let timestamp = Int(time(nil))
+        if timestamp <= age { return }
+        _kv.removeItemsEarlierThan(age)
+    }
+    
+    private func _trimToFreeDiskSpace(_ space: Int) {
+        if space == 0 { return }
+        let totalBytes = _kv.itemsSize()
+        if totalBytes <= 0 { return }
+        let diskFreeBytes = _freeSpaceInDisk()
+        if diskFreeBytes < 0 { return }
+        let needTrimBytes = space - diskFreeBytes
+        if needTrimBytes <= 0 { return }
+        var costLimit = totalBytes - needTrimBytes
+        if costLimit < 0 { costLimit = 0 }
+        _trimToCost(costLimit)
+    }
+    
+}

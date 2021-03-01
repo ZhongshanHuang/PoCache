@@ -1,0 +1,6 @@
+framework module PoCache {
+  umbrella header "PoCache-umbrella.h"
+
+  export *
+  module * { export * }
+}
